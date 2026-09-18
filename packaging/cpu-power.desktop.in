@@ -1,0 +1,27 @@
+# Desktop entry for CPU-Power. GENERATED from packaging/cpu-power.desktop.in by CMake -- edit the
+# .in file, never the copy in the build directory.
+#
+# Exec carries the FULL installed path rather than a bare "cpu-power". A bare name is resolved
+# against the PATH of whatever process launches the entry, and a desktop session's PATH is not
+# the shell's: a tool installed under /usr/local/bin is routinely invisible to it. The path is
+# substituted from the same CMAKE_INSTALL_FULL_BINDIR the binary is installed to, so the two
+# cannot drift.
+#
+# Icon is a NAME, not a path -- deliberately. The icon theme lookup finds cpu-power.png at
+# whatever size the reader wants, and a path would pin one size forever. This entry is only half
+# of being identifiable: a plain window manager never reads desktop entries at all, and takes the
+# icon from the _NET_WM_ICON property the program publishes on its own window.
+
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=CPU Power
+GenericName=CPU Frequency Scaling
+Comment=Set the CPU governor, frequency limits, turbo and audio latency
+Exec=@CMAKE_INSTALL_FULL_BINDIR@/cpu-power
+Icon=cpu-power
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=cpu;power;frequency;governor;scaling;turbo;performance;powersave;latency;daw;audio;
+StartupNotify=false
+StartupWMClass=cpu-power

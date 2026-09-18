@@ -1,0 +1,42 @@
+# Build trees. The project is configured out of tree (cmake -S . -B build).
+build/
+build-*/
+
+# CMake residue, in case somebody configures IN tree by mistake.
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+install_manifest.txt
+compile_commands.json
+.cache/
+
+# Release tarballs, built by scripts/make-release.sh.
+dist/
+
+# Local-only development documents and tooling. Tracked source must never reference any of these
+# by name: a comment citing a file the reader does not have is worse than no comment, and
+# scripts/make-release.sh fails the release if one appears.
+CLAUDE.md
+PLAN.md
+RULES.md
+SECURITY.md
+task.md
+.claude/
+
+# Editor and OS droppings.
+*~
+*.swp
+*.swo
+.DS_Store
+.vscode/
+.idea/
+
+# Object files and core dumps. NOTE: the pattern for a core dump is deliberately NOT a bare
+# "core" -- that would also match the src/core/ directory and silently drop the model from the
+# repository. Anchored and suffixed forms only.
+*.o
+*.a
+*.so
+/core
+core.[0-9]*

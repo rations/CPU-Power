@@ -1,0 +1,182 @@
+.\" cpu-power(1) -- GENERATED from packaging/cpu-power.1.in by CMake.
+.\" The installed paths below are substituted from the same build variables the program is
+.\" compiled with, so the manual cannot describe a layout the binary does not use.
+.TH CPU\-POWER 1 "2026-09-16" "cpu-power @PROJECT_VERSION@" "User Commands"
+.
+.SH NAME
+cpu\-power \- adjust CPU frequency scaling, turbo and audio latency from a window
+.
+.SH SYNOPSIS
+.B cpu\-power
+.RB [ \-\-scale
+.IR factor ]
+.br
+.B cpu\-power \-\-help
+.
+.SH DESCRIPTION
+.B cpu\-power
+is a small window for the CPU power settings the Linux kernel exposes under
+.IR /sys/devices/system/cpu .
+It sets the scaling governor, the energy/performance preference, the frequency
+limits, turbo, and the system's C\-state exit latency limit.
+.PP
+It is aimed at the case where the machine boots conservatively and some particular
+piece of work \- rendering, compiling, recording audio \- wants it to stop being
+conservative for a while, after which it should go back to how it was.
+.PP
+.B Nothing is applied until the Active toggle is turned on,
+and turning it off puts everything back. So does closing the window, and so does the
+program being killed: the privileged helper restores the machine when its input closes,
+which happens whatever kills the window. There is no path that depends on an orderly
+shutdown.
+.PP
+.B The tool does not know what your CPU can do; it asks.
+Governor names are read from
+.IR scaling_available_governors ,
+preference names from
+.IR energy_performance_available_preferences ,
+frequency limits from
+.IR cpuinfo_min_freq " and " cpuinfo_max_freq ,
+and turbo from whichever of
+.IR intel_pstate/no_turbo ", " cpufreq/boost " or " policyX/boost
+this machine has. A driver it has never heard of still works. A control the machine does
+not offer is shown disabled and labelled, never silently ignored, and the readout shows
+what the kernel reports afterwards rather than what was asked for.
+.
+.SH OPTIONS
+.TP
+.BI \-\-scale " factor"
+Scale the window. Useful on a high\-DPI display. The value is remembered, so this is
+normally needed once.
+.TP
+.B \-\-help
+Print usage, including where preferences are stored, and exit.
+.
+.SH THE CONTROLS
+.TP
+.B The slider
+Five stops \- Powersave, Balanced, Balanced\-Performance, Performance, Maximum.
+They are named rather than numbered because the kernel's knobs are enumerations and
+there is no continuum between them. Each stop is a
+.I wish
+resolved against what the running driver actually offers, so the same stop means the
+same thing on machines that implement it completely differently: where
+.B intel_pstate
+is active the top four stops are separated by the energy/performance preference, and
+where it is not they are separated by the governor. The readout shows which.
+.TP
+.B Active
+The master toggle, and the tool's whole safety property. Off means the machine is
+exactly as the kernel left it. It is also what starts the privileged helper \- nothing
+runs as root until this is turned on.
+.TP
+.B Turbo
+Whether the CPU may clock above its rated base frequency.
+.TP
+.B DAW mode
+Caps C\-state exit latency, which is a different problem from clock speed and is not
+solved by any governor setting. A core that finishes early goes idle, and waking it from
+a deep C\-state costs hundreds of microseconds out of an audio period that may only be
+about 1300 of them \- so a faster core can produce
+.I more
+dropouts, not fewer. This holds
+.I /dev/cpu_dma_latency
+open at the smallest non\-zero exit latency the machine reports: the shallowest state
+that still halts the core. It does not request zero, which would admit only the POLL
+pseudo\-state and leave every core spinning for no benefit. Because the kernel drops the
+constraint when the last descriptor closes, DAW mode cannot get stuck on.
+.
+.SH HOW IT REACHES ROOT
+The window is never root and is never setuid. One small program, installed at
+.IR @CPUPOWER_HELPER_PATH@ ,
+runs as root, and it is reached by the least intrusive route available:
+.PP
+.RS
+.nf
+1.  already root       run it directly
+2.  pkexec             but only if polkit ALREADY authorises
+                       @CPUPOWER_POLKIT_ACTION_ID@ with no interaction
+3.  neither            fail, saying what to do about it
+.fi
+.RE
+.PP
+.B This program never asks for a password and never handles one,
+and step 2 is what guarantees it rather than merely intending it. Before using
+.BR pkexec (1)
+the program asks
+.BR pkcheck (1)
+whether the action will be authorised silently, and proceeds only on an unqualified yes.
+A missing or unparseable action does not make
+.B pkexec
+fail \- it makes it fall back to
+.IR org.freedesktop.policykit.exec ,
+whose defaults are
+.IR auth_admin ,
+and the session's own authentication agent turns that into a root password dialog. The
+pre\-flight question cannot itself prompt, because
+.B \-\-allow\-user\-interaction
+is never passed.
+.PP
+On the normal path nothing is asked at all: the installed action's defaults are
+.IR allow_any=no ", " allow_inactive=no ", " allow_active=yes ,
+which grants the request to whoever is
+.I physically at the machine
+and to nobody else \- not a remote login, not a switched\-away session, not another
+logged\-in user. Adjusting your own CPU is a preference, not an administrative act, and
+this is how every desktop settings panel treats it.
+.PP
+There is no
+.B sudo
+fallback and no interactive fallback. A
+.BR sudoers (5)
+rule would be a
+.I broader
+grant than the polkit action, not a narrower one, because it also applies over SSH and
+from any process that user can start. Without polkit, run the helper as root yourself;
+the program prints the exact command when it cannot reach it.
+.
+.SH FILES
+.TP
+.I @CPUPOWER_HELPER_PATH@
+The privileged helper. Plain C, libc only, no configuration file, no network, no shell.
+It takes no path from anyone: it opens one descriptor on
+.I /sys/devices/system/cpu
+at startup, proves it is sysfs, and anchors every later access to it.
+.TP
+.I @CPUPOWER_POLKIT_ACTIONDIR@/@CPUPOWER_POLKIT_ACTION_ID@.policy
+The polkit action \- the rule saying who may run the helper. If this is missing or
+cannot be parsed, polkit ignores it silently and the tool falls back.
+.TP
+.I ~/.config/cpu-power/config
+Remembered window preferences. It records where the controls sit and
+.B is not applied at startup;
+nothing changes until Active is turned on.
+Honours
+.IR $XDG_CONFIG_HOME .
+.
+.SH EXIT STATUS
+.TP
+.B 0
+Normal exit.
+.TP
+.B 1
+Could not start: no display, or the CPU interface could not be read.
+.TP
+.B 2
+Bad command line.
+.
+.SH SECURITY
+.B pkexec is setuid root.
+That is a real cost of reaching privilege this way, and it is stated rather than glossed.
+What it buys is that no part of this project ever handles your password. The install sets
+no setuid or setgid bit of its own.
+.
+.SH SEE ALSO
+.BR pkexec (1),
+.BR polkit (8),
+.BR sudoers (5)
+.PP
+The kernel's own documentation is the authority for everything this tool writes:
+.IR Documentation/admin\-guide/pm/cpufreq.rst ,
+.IR intel_pstate.rst ,
+.IR cpuidle.rst " and " pm_qos_interface.rst .

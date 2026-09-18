@@ -1,0 +1,114 @@
+CPU-Power — a small GUI for CPU frequency scaling and power settings on Linux
+Copyright (c) 2026 rations
+
+CPU-Power is released under the MIT Licence; see LICENSE. That covers everything
+in src/, helper/, tools/, scripts/, docs/ and packaging/.
+
+It also covers the application artwork — icon.png, the icon set generated from it
+in packaging/icons/, and the same artwork compiled into the GUI as
+src/platform/appicon.h — which is this project's own work and not a third-party
+component. If that artwork ever comes from somewhere else, this paragraph is the
+line that has to change.
+
+The third-party components it links or redistributes are covered by the licences
+below.
+
+-------------------------------------------------------------------------------
+
+REDISTRIBUTED
+
+  Roboto                 https://github.com/googlefonts/roboto
+  Copyright 2011 The Roboto Project Authors
+  SPDX-License-Identifier: Apache-2.0
+  Licence text: resources/fonts/Roboto-LICENSE.txt
+
+  resources/fonts/Roboto-Regular.ttf is redistributed unmodified. It is the
+  body face: readouts, legends and the status strip. It is loaded from the
+  installed path with FreeType so the tool does not depend on the font being
+  installed system-wide.
+
+  Apache-2.0 section 4(a) requires a copy of the licence to reach anyone who
+  receives the work, which is why the text is checked in beside the font and
+  installed with it -- the same reason the OFL text below is.
+
+  Michroma                https://fonts.google.com/specimen/Michroma
+  Copyright 2011 The Michroma Project Authors
+  SPDX-License-Identifier: OFL-1.1
+  Licence text: resources/fonts/Michroma-OFL.txt
+
+  resources/fonts/Michroma-Regular.ttf is redistributed unmodified. It is the
+  title face, and it is here so this window reads as part of the same family as
+  the author's rations-amp plug-ins. The OFL requires the licence to travel
+  with the font, which is why the text is checked in beside it.
+
+-------------------------------------------------------------------------------
+
+EXECUTED AT RUN TIME (not linked, not redistributed)
+
+  These are separate programs CPU-Power runs to reach root. Neither contributes
+  a header to the include graph nor a library to the link line, so neither
+  affects this project's MIT licensing -- but they are load-bearing at run time,
+  and a NOTICE that only lists what is linked would understate what the tool
+  actually depends on.
+
+  polkit                 LGPL-2.0-or-later
+  https://github.com/polkit-org/polkit
+
+  Two of its programs are executed with execve(), both found by absolute path
+  and never through $PATH:
+
+    /usr/bin/pkexec   starts the privileged helper.
+    /usr/bin/pkcheck  is asked, FIRST, whether polkit will authorise the action
+                      with no interaction. pkexec is used only if it says yes,
+                      which is what keeps this tool from ever raising a password
+                      dialog.
+
+  CPU-Power also installs one polkit action (.policy) file describing what the
+  local seated user is allowed to do. No polkit header is included and
+  libpolkit-gobject is on no link line; scripts/sec-gate.sh asserts this rather
+  than trusting it. Behaviour relied on is documented in
+  third_party/refs/polkit/SOURCES.md, cited to upstream source by line.
+
+  sudo is NOT executed and no longer appears here. A `sudo -n` fallback existed
+  and was removed: a sudoers grant is not limited to the person at the machine,
+  so it was a second privilege path with different properties from the first.
+  The sudoers example that went with it is deleted too.
+
+-------------------------------------------------------------------------------
+
+LINKED (system libraries, not redistributed)
+
+  cairo, cairo-ft        LGPL-2.1-or-later OR MPL-1.1
+  freetype2              FTL OR GPL-2.0-or-later  (used under the FTL)
+  fontconfig             MIT-style
+  libX11, libXext        MIT (X11 Licence)
+
+  These are linked dynamically against the copies installed on the user's
+  system. None is redistributed here. FreeType is used under the FreeType
+  Licence, which is BSD-style with a credit clause, and not under its GPL
+  alternative.
+
+-------------------------------------------------------------------------------
+
+CONSULTED, NOT USED
+
+  The following were read as documentation of kernel behaviour and of prior
+  art. NO CODE FROM EITHER IS PRESENT IN THIS TREE, and neither is linked. They
+  are recorded here because they informed the design and it would be dishonest
+  to omit them.
+
+  Linux kernel documentation        GPL-2.0-only (Documentation/)
+  Documentation/admin-guide/pm/*.rst and Documentation/power/pm_qos_interface.rst
+  are the normative reference for every sysfs attribute this tool writes.
+  Facts about a published kernel interface are not copyrightable expression;
+  no text is reproduced beyond short quotations cited in comments.
+
+  cpupower                          GPL-2.0-only
+  https://git.kernel.org/.../tools/power/cpupower
+  Read to confirm real-world write behaviour and edge cases.
+
+  cpupower-gui                      GPL-3.0-or-later
+  https://github.com/vagnum08/cpupower-gui
+  Read as a user-interface reference only.
+
+  This project is MIT and no GPL code may enter its include graph or link line.
