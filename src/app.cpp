@@ -694,8 +694,20 @@ void App::shutdown()
     // that died, and the helper restores on it. That asymmetry is the safety property -- a crash
     // still puts the machine back, because a crash cannot send a verb -- so persisting has to be
     // asked for explicitly, and it is.
-    if (mPanel.master.on && mSession.detach())
-        return;
+    if (mPanel.master.on) {
+        if (mSession.detach())
+            return;
+
+        // Falling back to a restore here is the right thing to DO and the wrong thing to do
+        // QUIETLY: the user asked for settings that outlive the window, and instead the machine
+        // is about to be put back. Saying nothing would make that look like the feature not
+        // working rather than like an error with a cause, which is a much harder thing to
+        // report and a much harder thing to fix.
+        ::fprintf(stderr, "cpu-power: could not keep the settings after closing: %s\n",
+                  mSession.error().empty() ? "the helper refused to detach"
+                                           : mSession.error().c_str());
+        ::fprintf(stderr, "cpu-power: restoring instead, so the machine is not left changed.\n");
+    }
 
     // Not on, or the helper would not detach: close the channel and let the restore happen.
     mSession.stop();

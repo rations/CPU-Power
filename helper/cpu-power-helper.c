@@ -723,6 +723,21 @@ static int open_runtime_dir(void)
         return -1;
     }
 
+    /* THE MODE IS SET EXPLICITLY, NOT LEFT TO mkdir. This process runs under umask(077), set
+     * deliberately so that anything it creates is private by default -- which turns the 0755
+     * above into 0700 and makes the directory untraversable by the very user who has to reach
+     * the socket inside it. Their connect() then fails with EACCES and re-attaching becomes
+     * impossible, silently, because nothing in this process ever notices.
+     *
+     * 0755 is the right mode and not a relaxation: the socket itself is 0600 and owned by that
+     * user, so the directory grants the ability to LOOK, not the ability to connect. Making it
+     * 0700 protects nothing that the socket's own mode does not already protect. */
+    if (fchmod(dfd, 0755) != 0) {
+        warn_("cannot set mode on %s: %s", dir, strerror(errno));
+        close(dfd);
+        return -1;
+    }
+
     struct stat st;
     if (fstat(dfd, &st) != 0) {
         warn_("cannot stat %s: %s", dir, strerror(errno));
@@ -1164,7 +1179,10 @@ static void dispatch(char *line)
          * a client told "OK" would close its end believing the settings were safe, and the EOF
          * that follows would restore them instead -- the exact opposite of what it asked for. */
         if (start_listening() != 0) {
-            say("ERR detach: cannot create the rendezvous socket");
+            /* The reason travels with the refusal. start_listening() also warns on stderr, but
+             * stderr belongs to whoever launched the GUI and is usually nowhere; the client can
+             * put this on screen. */
+            say("ERR detach: cannot create the rendezvous socket: %s", strerror(errno));
         } else {
             g_detached = 1;
             say("OK %s", g_sock_path);

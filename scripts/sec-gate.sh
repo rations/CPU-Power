@@ -189,6 +189,13 @@ print("KEPT" if epp() == "performance" else "FAIL not-kept")
 mode = oct(os.stat(sock).st_mode & 0o777)
 print("MODE-OK" if mode == "0o600" else f"FAIL mode-{mode}")
 
+# The DIRECTORY has to be traversable by the user who owns the socket, or their connect()
+# fails with EACCES and re-attaching is impossible. This broke once: the helper runs under
+# umask(077), which silently turned mkdir(0755) into 0700 and made the socket unreachable
+# by the only process allowed to use it.
+dmode = oct(os.stat(os.path.dirname(sock)).st_mode & 0o777)
+print("DIR-OK" if dmode == "0o755" else f"FAIL dirmode-{dmode}")
+
 # A second client while one is attached must be refused, not left hanging.
 c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); c.connect(sock)
 g = line(c)
@@ -210,6 +217,7 @@ PY
 for claim in ALIVE:"the helper outlives a client that said DETACH" \
              KEPT:"the setting is still applied after the client is gone" \
              MODE-OK:"the rendezvous socket is mode 0600" \
+             DIR-OK:"the directory holding it is 0755, so its owner can actually reach it" \
              REATTACH:"a later client re-attaches and is greeted" \
              BUSY-REFUSED:"a SECOND client is refused rather than left hanging" \
              PRISTINE:"switching off after a detach restores the ORIGINAL state, not the detached one" \
