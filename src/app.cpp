@@ -119,11 +119,31 @@ bool App::probe()
                                   : "no turbo control, and " + mPanel.daw.disabledReason;
     }
 
+    // A helper left running by an earlier window means the machine is ALREADY overridden, and
+    // this window is the way back to it rather than a fresh start. Adopt it before anything is
+    // drawn, so the panel opens showing what is true instead of showing "off" over a machine
+    // that is pinned -- which is the same lie as a control that does nothing, told the other way
+    // round.
+    const bool adopted = mSession.adopt();
+    if (adopted) {
+        mPanel.master.on = true;
+        // The greeting carries the PM-QoS hold, because that one is not visible in sysfs: it
+        // lives in this process's open descriptor and nowhere else. Asking the kernel is not an
+        // option, so the holder is asked instead.
+        const std::string &g = mSession.greeting();
+        const std::string key = "latency=";
+        const size_t at = g.find(key);
+        if (at != std::string::npos && mPanel.daw.enabled)
+            mPanel.daw.on = ::strtol(g.c_str() + at + key.size(), nullptr, 10) >= 0;
+    }
+
     refreshFromSysfs();
     showLive();
 
     if (!missing.empty())
         setStatus(missing);
+    else if (adopted)
+        setStatus("re-attached to settings left running by an earlier window");
     else
         setStatus("ready; nothing is changed until Active is turned on");
 
@@ -661,10 +681,24 @@ void App::showLive()
 //------------------------------------------------------------------------
 void App::shutdown()
 {
-    if (mSession.running()) {
-        // stop() closes the pipe, which is the restore trigger, and waits for the helper to go.
-        mSession.stop();
-    }
+    if (!mSession.running())
+        return;
+
+    // CLOSING THE WINDOW IS NOT SWITCHING OFF. This is a window you open to change a setting and
+    // then close; the setting is meant to still be there afterwards, or there would be no point
+    // having it. So while the tool is on, the helper is told to carry on without us and the
+    // machine is left exactly as the user set it. Switching off is what reverts, and that is the
+    // Active toggle -- one control, doing one thing, visible on screen.
+    //
+    // Note what is NOT done here: simply closing the channel. An unannounced EOF means a client
+    // that died, and the helper restores on it. That asymmetry is the safety property -- a crash
+    // still puts the machine back, because a crash cannot send a verb -- so persisting has to be
+    // asked for explicitly, and it is.
+    if (mPanel.master.on && mSession.detach())
+        return;
+
+    // Not on, or the helper would not detach: close the channel and let the restore happen.
+    mSession.stop();
 }
 
 } // namespace cpupower

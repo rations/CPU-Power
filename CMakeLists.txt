@@ -154,11 +154,26 @@ set(CPUPOWER_PKEXEC_ARGV1 "--serve")
 # program in this tree that runs as root. It is a few hundred lines and is not on a hot path, so
 # the cost is nil and the guarantee is unconditional rather than at the compiler's discretion.
 # sec-gate.sh asserts the canary is actually present in the built binary.
+# Where the helper puts the socket a re-attaching GUI finds it on. A COMPILE-TIME CONSTANT, for
+# the same reason the helper's own path is one: it is a name a root process opens, and a name
+# that can be influenced from outside is a name an attacker gets a say in. The directory is
+# created mode 0755 owned by root; the socket inside it is 0600 owned by the user who started
+# the session, and the helper additionally checks SO_PEERCRED on every connection.
+#
+# /run is the FHS location for exactly this -- runtime data that does not survive a reboot --
+# and not surviving a reboot is the intended behaviour, not a limitation: settings last until
+# they are switched off or the machine goes down.
+set(CPUPOWER_RUNTIME_DIR "/run/cpu-power"
+    CACHE PATH "Directory for the helper's re-attach socket")
+
 add_executable(cpu-power-helper helper/cpu-power-helper.c)
+target_compile_definitions(cpu-power-helper
+    PRIVATE CPUPOWER_RUNTIME_DIR="${CPUPOWER_RUNTIME_DIR}")
 target_compile_options(cpu-power-helper PRIVATE -Wall -Wextra -Werror -fstack-protector-all)
 
 add_executable(cpu-power-helper-test helper/cpu-power-helper.c)
-target_compile_definitions(cpu-power-helper-test PRIVATE CPUPOWER_TEST_BUILD=1)
+target_compile_definitions(cpu-power-helper-test
+    PRIVATE CPUPOWER_TEST_BUILD=1 CPUPOWER_RUNTIME_DIR="${CPUPOWER_RUNTIME_DIR}")
 target_compile_options(cpu-power-helper-test PRIVATE -Wall -Wextra -Werror)
 
 find_package(PkgConfig REQUIRED)
@@ -210,7 +225,8 @@ target_include_directories(cpupower-spawn PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
 target_compile_definitions(cpupower-spawn PUBLIC
     CPUPOWER_HELPER_PATH="${CPUPOWER_HELPER_PATH}"
     CPUPOWER_POLKIT_ACTION_ID="${CPUPOWER_POLKIT_ACTION_ID}"
-    CPUPOWER_PKEXEC_ARGV1="${CPUPOWER_PKEXEC_ARGV1}")
+    CPUPOWER_PKEXEC_ARGV1="${CPUPOWER_PKEXEC_ARGV1}"
+    CPUPOWER_RUNTIME_DIR="${CPUPOWER_RUNTIME_DIR}")
 target_compile_options(cpupower-spawn PRIVATE -Wall -Wextra -Werror)
 
 add_executable(cpu-power-cli tools/cpu-power-cli.cpp)

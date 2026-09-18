@@ -22,11 +22,21 @@
  *     cannot be swapped underneath us mid-session.
  *
  *   * NO exec, NO shell, NO network, NO config file, NO getenv. PR_SET_NO_NEW_PRIVS makes the
- *     first of those structural rather than a promise.
+ *     first of those structural rather than a promise. The one socket this process listens on
+ *     is a local rendezvous for re-attaching, reachable only by the uid that started the
+ *     session and answering nothing but the same closed protocol.
  *
- *   * RESTORE ON EVERY EXIT PATH. EOF on stdin, SIGTERM, SIGINT, SIGHUP. The GUI being SIGKILLed
- *     still closes the pipe, so there is no path where this process outlives the GUI while
- *     holding the machine at a setting. Reversibility is structural, not cleanup code.
+ *   * RESTORE ON EVERY UNPLANNED EXIT PATH. EOF without a preceding DETACH, SIGTERM, SIGINT,
+ *     SIGHUP. The GUI being SIGKILLed still closes the channel, so a client that dies badly
+ *     always puts the machine back, and no path depends on an orderly shutdown.
+ *
+ *     DETACH is the single exception and it is EXPLICIT, which is the whole of its safety: a
+ *     crash cannot be mistaken for a request to persist, because a crash cannot send a verb.
+ *     After it, this process outlives the window on purpose and exits when the settings are
+ *     switched off instead -- so a root process exists exactly while the machine is overridden.
+ *     That is a real weakening of "this cannot outlive the GUI", taken deliberately: the PM-QoS
+ *     latency request cannot outlive this process by any means (pm_qos_interface.rst:71-78), so
+ *     the alternative was not a safer tool but a DAW mode that ends when you close the window.
  *
  *   * STDOUT CARRIES PROTOCOL RESPONSES AND NOTHING ELSE. Every diagnostic goes to stderr. A
  *     stray byte on fd 1 desynchronises the protocol.
@@ -58,6 +68,8 @@
  *   SNAPSHOT                      report the machine's current state
  *   LATENCY <us> | LATENCY OFF    /dev/cpu_dma_latency PM-QoS hold
  *   RESTORE                       put back what was captured at startup
+ *   DETACH                        keep everything applied and outlive this client; the reply is
+ *                                 "OK <socket>", which is where the next client re-attaches
  *   QUIT                          restore and exit
  *
  * Responses: "OK", "OK <detail>", or "ERR <reason>". Never anything else.
@@ -87,7 +99,9 @@
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/vfs.h>
 #include <unistd.h>
 
@@ -136,6 +150,20 @@ struct policy_state {
 
 static int g_cpufd = -1; /* dirfd on /sys/devices/system/cpu, held for the process lifetime */
 static int g_latency_fd = -1;
+static long g_latency_us = -1; /* the value currently held, or -1 for none */
+
+/* The protocol channel. Not hardwired to stdin/stdout any more: after DETACH the original
+ * channel is gone and a re-attaching client arrives on an accepted socket instead. Everything
+ * that reads or writes protocol goes through these two. */
+static int g_in_fd = STDIN_FILENO;
+static int g_out_fd = STDOUT_FILENO;
+
+/* Residency. g_detached says the GUI asked us to outlive it; g_listen_fd is how the next one
+ * finds us again; g_owner_uid is the ONLY uid allowed to do so. */
+static int g_detached = 0;
+static int g_listen_fd = -1;
+static uid_t g_owner_uid = (uid_t)-1;
+static char g_sock_path[108]; /* sun_path is 108 bytes and that is the real limit */
 static enum turbo_knob g_turbo = TURBO_NONE;
 static char g_turbo_global[MAX_VALUE]; /* raw value at startup, for a global knob */
 
@@ -179,10 +207,10 @@ static void say(const char *fmt, ...)
     va_start(ap, fmt);
     const int n = vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    if (n <= 0)
+    if (n <= 0 || g_out_fd < 0)
         return;
-    full_write(STDOUT_FILENO, buf, (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1);
-    full_write(STDOUT_FILENO, "\n", 1);
+    full_write(g_out_fd, buf, (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1);
+    full_write(g_out_fd, "\n", 1);
 }
 
 static void warn_(const char *fmt, ...)
@@ -612,6 +640,219 @@ static void release_latency(void)
         close(g_latency_fd);
         g_latency_fd = -1;
     }
+    g_latency_us = -1;
+}
+
+/* ---------------------------------------------------------------------------------------- */
+/* RESIDENCY AND RE-ATTACH.
+ *
+ * The GUI is a window you open to change a setting and then close. The settings have to outlive
+ * it -- that is the whole point of the tool -- and one of them CANNOT outlive this process no
+ * matter what we do: the PM-QoS latency request exists for exactly as long as the descriptor is
+ * open. "As long as the device node is held open that process has a registered request on the
+ * parameter [...] To remove the user mode request for a target value simply close the device
+ * node." (pm_qos_interface.rst:71-78.) So either something stays resident or DAW mode ends when
+ * the window does.
+ *
+ * Hence DETACH: the GUI says "keep going without me", and this process stops restoring on EOF
+ * and starts listening instead. It exits when the settings are switched off, not when the
+ * window closes -- so a root process exists exactly while the machine is overridden, and never
+ * otherwise.
+ *
+ * WHY THE SNAPSHOT IS WHY WE STAY. It would be tempting to exit as soon as nothing needs an open
+ * descriptor, since a governor write is just sysfs and persists on its own. That would be wrong:
+ * this process is also holding the state the machine had BEFORE any of this, which is what
+ * "off" puts back. Exit while the slider is still applied and the next session snapshots the
+ * ALREADY-MODIFIED machine as its baseline -- after which switching off restores what is already
+ * there and silently does nothing. A control that appears to work and does not is the one
+ * outcome this design refuses everywhere else, so it is refused here too.
+ *
+ * WHO MAY RE-ATTACH. The listening socket is the only way back in to a root process, so the
+ * question "who is on the other end" is answered by the kernel, not by anything the peer says.
+ * SO_PEERCRED on the accepted connection gives credentials the kernel recorded at connect time;
+ * they cannot be forged by the peer and nothing in the protocol can influence them. The same
+ * call on the ORIGINAL channel is where the owning uid comes from in the first place: the GUI
+ * creates the socketpair, so the kernel has already recorded who it belongs to. No environment
+ * variable is consulted for this. pkexec does export PKEXEC_UID, and it is honest -- it is set
+ * from pkexec's own getuid() after the environment has been cleared (pkexec.c:941) -- but an
+ * inherited string is a thing to trust and a peer credential is a thing to check. */
+
+/* The owning uid, taken from the kernel's record of who created the protocol channel. Falls
+ * back to the real uid when stdin is not a socket, which is the direct-launch case the gates
+ * use; it is never taken from the environment or from the protocol. */
+static void learn_owner_uid(void)
+{
+    struct ucred cr;
+    socklen_t len = sizeof(cr);
+    if (getsockopt(STDIN_FILENO, SOL_SOCKET, SO_PEERCRED, &cr, &len) == 0 && len == sizeof(cr))
+        g_owner_uid = cr.uid;
+    else
+        g_owner_uid = getuid();
+}
+
+/* The directory the rendezvous socket lives in. A compile-time constant, never derived from the
+ * environment or from anything the protocol said -- the same rule as the helper's own path. */
+static const char *runtime_dir(void)
+{
+#ifdef CPUPOWER_TEST_BUILD
+    static char buf[64];
+    if (g_sysroot) {
+        const int n = snprintf(buf, sizeof(buf), "%s/run", g_sysroot);
+        if (n > 0 && (size_t)n < sizeof(buf))
+            return buf;
+    }
+#endif
+    return CPUPOWER_RUNTIME_DIR;
+}
+
+/* Create the runtime directory, or prove the one already there is ours to use. A socket in a
+ * directory somebody else can rename or replace is a socket somebody else can stand in front
+ * of, so the checks are on the OPENED directory rather than on its name: O_NOFOLLOW refuses a
+ * symlink outright, and the ownership and mode come from fstat on the descriptor we hold. */
+static int open_runtime_dir(void)
+{
+    const char *dir = runtime_dir();
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        warn_("cannot create %s: %s", dir, strerror(errno));
+        return -1;
+    }
+
+    const int dfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (dfd < 0) {
+        warn_("cannot open %s: %s", dir, strerror(errno));
+        return -1;
+    }
+
+    struct stat st;
+    if (fstat(dfd, &st) != 0) {
+        warn_("cannot stat %s: %s", dir, strerror(errno));
+        close(dfd);
+        return -1;
+    }
+    /* Owned by the user we are running as, and writable by nobody else. Anything looser and the
+     * socket below could be replaced between our unlink and our bind. */
+    if (st.st_uid != geteuid() || (st.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        warn_("%s is not owned by us or is writable by others; refusing to use it", dir);
+        close(dfd);
+        return -1;
+    }
+    return dfd;
+}
+
+/* Bind and listen. Returns 0 on success. The socket is mode 0600 and owned by the user who
+ * started us, because connecting to a unix socket needs write permission on it: that is the
+ * filesystem half of the answer to "who may re-attach", and SO_PEERCRED on accept is the other
+ * half. Neither is trusted alone. */
+static int start_listening(void)
+{
+    if (g_listen_fd >= 0)
+        return 0;
+
+    const int dfd = open_runtime_dir();
+    if (dfd < 0)
+        return -1;
+
+    char name[64];
+    int n = snprintf(name, sizeof(name), "helper-%lu.sock", (unsigned long)g_owner_uid);
+    if (n <= 0 || (size_t)n >= sizeof(name)) {
+        close(dfd);
+        return -1;
+    }
+
+    n = snprintf(g_sock_path, sizeof(g_sock_path), "%s/%s", runtime_dir(), name);
+    if (n <= 0 || (size_t)n >= (int)sizeof(g_sock_path)) {
+        warn_("rendezvous socket path does not fit in sun_path");
+        close(dfd);
+        g_sock_path[0] = '\0';
+        return -1;
+    }
+
+    /* A socket left behind by a helper that was killed. Removing it is safe precisely because
+     * the directory above is ours alone: nobody else could have put it there. */
+    (void)unlinkat(dfd, name, 0);
+
+    const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        warn_("socket: %s", strerror(errno));
+        close(dfd);
+        g_sock_path[0] = '\0';
+        return -1;
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    (void)copy_bounded(addr.sun_path, sizeof(addr.sun_path), g_sock_path);
+
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        warn_("bind %s: %s", g_sock_path, strerror(errno));
+        close(fd);
+        close(dfd);
+        g_sock_path[0] = '\0';
+        return -1;
+    }
+
+    /* umask is 077 here, so the bind already produced 0600; set it explicitly anyway rather than
+     * depend on a umask set several hundred lines away, then hand it to the owner so they can
+     * connect to it without being root. */
+    if (fchmodat(dfd, name, 0600, 0) != 0 || fchownat(dfd, name, g_owner_uid, (gid_t)-1, 0) != 0) {
+        warn_("cannot set mode/owner on %s: %s", g_sock_path, strerror(errno));
+        (void)unlinkat(dfd, name, 0);
+        close(fd);
+        close(dfd);
+        g_sock_path[0] = '\0';
+        return -1;
+    }
+
+    if (listen(fd, 1) != 0) {
+        warn_("listen: %s", strerror(errno));
+        (void)unlinkat(dfd, name, 0);
+        close(fd);
+        close(dfd);
+        g_sock_path[0] = '\0';
+        return -1;
+    }
+
+    close(dfd);
+    g_listen_fd = fd;
+    return 0;
+}
+
+static void stop_listening(void)
+{
+    if (g_listen_fd >= 0) {
+        close(g_listen_fd);
+        g_listen_fd = -1;
+    }
+    if (g_sock_path[0]) {
+        (void)unlink(g_sock_path);
+        g_sock_path[0] = '\0';
+    }
+}
+
+/* Accept one client and prove who it is. Returns the fd, or -1 if there was nobody to take or
+ * the peer was not the owner. Being refused is logged: a connection from another uid is either
+ * a bug or somebody trying, and neither should be silent. */
+static int accept_client(void)
+{
+    const int fd = accept4(g_listen_fd, NULL, NULL, SOCK_CLOEXEC);
+    if (fd < 0)
+        return -1;
+
+    struct ucred cr;
+    socklen_t len = sizeof(cr);
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &len) != 0 || len != sizeof(cr)) {
+        warn_("cannot read peer credentials; refusing the connection");
+        close(fd);
+        return -1;
+    }
+    if (cr.uid != g_owner_uid && cr.uid != 0) {
+        warn_("refused re-attach from uid %lu (this session belongs to uid %lu)",
+              (unsigned long)cr.uid, (unsigned long)g_owner_uid);
+        close(fd);
+        return -1;
+    }
+    return fd;
 }
 
 /* The one exit path. Everything that ends this process goes through here. */
@@ -621,6 +862,7 @@ static void shutdown_and_exit(int code)
     if (failures > 0)
         warn_("restore completed with %d failure(s)", failures);
     release_latency();
+    stop_listening();
     if (g_cpufd >= 0)
         close(g_cpufd);
     _exit(code);
@@ -663,6 +905,8 @@ static int set_latency(const char *arg)
     do {
         n = write(g_latency_fd, &value, sizeof(value));
     } while (n < 0 && errno == EINTR);
+    if (n == (ssize_t)sizeof(value))
+        g_latency_us = us;
 
     if (n != (ssize_t)sizeof(value)) {
         release_latency();
@@ -915,6 +1159,16 @@ static void dispatch(char *line)
     } else if (strcmp(argv[0], "RESTORE") == 0) {
         g_nstaged = 0;
         say("OK failures=%d", restore_state());
+    } else if (strcmp(argv[0], "DETACH") == 0) {
+        /* Listen BEFORE answering. If we cannot, the honest answer is ERR and staying attached:
+         * a client told "OK" would close its end believing the settings were safe, and the EOF
+         * that follows would restore them instead -- the exact opposite of what it asked for. */
+        if (start_listening() != 0) {
+            say("ERR detach: cannot create the rendezvous socket");
+        } else {
+            g_detached = 1;
+            say("OK %s", g_sock_path);
+        }
     } else if (strcmp(argv[0], "QUIT") == 0) {
         say("OK");
         shutdown_and_exit(EX_OK_);
@@ -924,10 +1178,19 @@ static void dispatch(char *line)
 }
 
 /* ---------------------------------------------------------------------------------------- */
-/* The loop. Reads bounded lines from stdin. An overlong line is a fatal protocol error rather
- * than something to truncate and act on: acting on the first 256 bytes of a longer command is
- * exactly the kind of partial interpretation that turns malformed input into a wrong write. */
-static void serve(void)
+/* The loop. Reads bounded lines from the current protocol channel. An overlong line is a fatal
+ * protocol error rather than something to truncate and act on: acting on the first 256 bytes of
+ * a longer command is exactly the kind of partial interpretation that turns malformed input into
+ * a wrong write.
+ *
+ * Returns when the channel ends. EOF means the client went away WITHOUT saying DETACH -- it
+ * exited, was killed, or crashed -- and the caller restores. That is what keeps reversibility
+ * structural: a client that dies badly still puts the machine back, and no path depends on an
+ * orderly shutdown. DETACH is the one way to end a channel without that happening, and it is
+ * explicit precisely so that a crash can never be mistaken for it. */
+enum serve_result { SERVE_EOF, SERVE_DETACHED };
+
+static enum serve_result serve(void)
 {
     char line[MAX_LINE];
     size_t used = 0;
@@ -938,8 +1201,19 @@ static void serve(void)
             shutdown_and_exit(EX_OK_);
         }
 
-        struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN, .revents = 0};
-        const int r = poll(&pfd, 1, -1);
+        /* While attached, the listening socket is still polled so that a SECOND client gets a
+         * refusal instead of a silent hang: it connects, is told the session is busy, and goes
+         * away. Only one client owns the channel at a time. */
+        struct pollfd pfd[2];
+        pfd[0].fd = g_in_fd;
+        pfd[0].events = POLLIN;
+        pfd[0].revents = 0;
+        pfd[1].fd = g_listen_fd;
+        pfd[1].events = POLLIN;
+        pfd[1].revents = 0;
+        const int nfds = g_listen_fd >= 0 ? 2 : 1;
+
+        const int r = poll(pfd, (nfds_t)nfds, -1);
         if (r < 0) {
             if (errno == EINTR)
                 continue;
@@ -947,19 +1221,27 @@ static void serve(void)
             shutdown_and_exit(EX_ENV_);
         }
 
+        if (nfds == 2 && (pfd[1].revents & POLLIN) != 0) {
+            const int busy = accept_client();
+            if (busy >= 0) {
+                full_write(busy, "ERR busy\n", 9);
+                close(busy);
+            }
+        }
+
+        if ((pfd[0].revents & (POLLIN | POLLHUP | POLLERR)) == 0)
+            continue;
+
         char chunk[MAX_LINE];
-        const ssize_t n = read(STDIN_FILENO, chunk, sizeof(chunk));
+        const ssize_t n = read(g_in_fd, chunk, sizeof(chunk));
         if (n < 0) {
             if (errno == EINTR)
                 continue;
             warn_("read: %s", strerror(errno));
             shutdown_and_exit(EX_ENV_);
         }
-        if (n == 0) {
-            /* EOF. The GUI has exited, been killed, or crashed. This is the path that makes
-             * reversibility structural: there is no orderly shutdown to depend on. */
-            shutdown_and_exit(EX_OK_);
-        }
+        if (n == 0)
+            return SERVE_EOF;
 
         for (ssize_t i = 0; i < n; ++i) {
             const char c = chunk[i];
@@ -971,6 +1253,8 @@ static void serve(void)
                 if (used > 0 && line[used - 1] == '\r')
                     line[used - 1] = '\0';
                 dispatch(line);
+                if (g_detached)
+                    return SERVE_DETACHED; /* the OK has already been written */
                 used = 0;
                 continue;
             }
@@ -1134,9 +1418,57 @@ int main(int argc, char **argv)
         read_rel(rel, buf, sizeof(buf)) == 0)
         (void)copy_bounded(driver, sizeof(driver), buf);
 
-    say("READY driver=%s policies=%d turbo=%s", driver[0] ? driver : "-", g_npolicies,
-        turbo_name());
+    learn_owner_uid();
 
-    serve();
-    return EX_OK_;
+    say("READY driver=%s policies=%d turbo=%s latency=%ld", driver[0] ? driver : "-",
+        g_npolicies, turbo_name(), g_latency_us);
+
+    /* The lifetime of this process is the lifetime of the SETTINGS, not of the window.
+     *
+     *   EOF with no DETACH  -> the client died. Restore and exit.
+     *   DETACH              -> the window closed on purpose. Keep everything, wait for the next.
+     *   QUIT                -> switched off. Restore and exit. (Handled in dispatch.)
+     *
+     * So a root process exists exactly while the machine is overridden. There is no state on
+     * disk anywhere in this: what the machine looked like beforehand is held right here, in
+     * memory, for as long as there is something to put back. */
+    for (;;) {
+        if (serve() == SERVE_EOF)
+            shutdown_and_exit(EX_OK_);
+
+        /* Detached. The old channel belongs to a process that is on its way out; drop it so a
+         * stale descriptor cannot be read from or written to, and so the client's close() is not
+         * waiting on us. */
+        if (g_in_fd > STDERR_FILENO)
+            close(g_in_fd);
+        g_in_fd = -1;
+        g_out_fd = -1;
+
+        int client = -1;
+        while (client < 0) {
+            if (g_signalled) {
+                warn_("caught signal %d; restoring", (int)g_signalled);
+                shutdown_and_exit(EX_OK_);
+            }
+            struct pollfd lp = {.fd = g_listen_fd, .events = POLLIN, .revents = 0};
+            const int r = poll(&lp, 1, -1);
+            if (r < 0) {
+                if (errno == EINTR)
+                    continue;
+                warn_("poll: %s", strerror(errno));
+                shutdown_and_exit(EX_ENV_);
+            }
+            client = accept_client();
+        }
+
+        g_in_fd = client;
+        g_out_fd = client;
+        g_detached = 0;
+        g_nstaged = 0; /* nothing half-staged may survive a change of client */
+
+        /* The same greeting a fresh client gets, so re-attaching and starting are the same code
+         * path on the other side. */
+        say("READY driver=%s policies=%d turbo=%s latency=%ld", driver[0] ? driver : "-",
+            g_npolicies, turbo_name(), g_latency_us);
+    }
 }

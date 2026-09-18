@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -201,6 +202,8 @@ const char *HelperSession::methodName(Method m)
             return "polkit";
         case Method::Unprivileged:
             return "unprivileged";
+        case Method::Adopted:
+            return "adopted";
         case Method::None:
             break;
     }
@@ -400,9 +403,106 @@ bool HelperSession::tryRung(Method how, const std::vector<std::string> &argv, st
 }
 
 //------------------------------------------------------------------------
+std::string HelperSession::socketPath()
+{
+    // The directory is a compile-time constant and the only variable part is our own uid, read
+    // from the kernel. Nothing here comes from the environment or from a caller: this is the
+    // name of a socket belonging to a root process, and a name somebody else can influence is a
+    // name somebody else can stand in front of.
+    char buf[128];
+    const int n = ::snprintf(buf, sizeof(buf), "%s/helper-%lu.sock", CPUPOWER_RUNTIME_DIR,
+                             static_cast<unsigned long>(::getuid()));
+    if (n <= 0 || static_cast<size_t>(n) >= sizeof(buf))
+        return std::string();
+    return std::string(buf);
+}
+
+//------------------------------------------------------------------------
+bool HelperSession::adopt()
+{
+    const std::string path = socketPath();
+    if (path.empty())
+        return false;
+
+    struct sockaddr_un addr;
+    ::memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    if (path.size() >= sizeof(addr.sun_path))
+        return false;
+    ::memcpy(addr.sun_path, path.c_str(), path.size());
+
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return false;
+
+    // A failure here is the ORDINARY case -- no helper is running -- so it is not recorded as an
+    // error. Nothing has been started yet, and start() goes on to the privilege ladder.
+    if (::connect(fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) != 0) {
+        ::close(fd);
+        return false;
+    }
+
+    mFd = fd;
+    mPid = -1; // not our child: it outlived the window that started it
+    mMethod = Method::Adopted;
+    mPending.clear();
+
+    // The greeting is the proof. A resident helper that is busy with another client answers
+    // "ERR busy" instead, and a socket left behind by something else answers nothing at all --
+    // in both cases this is not our session and we must not pretend it is.
+    if (readLine(mGreeting, 5000) && mGreeting.compare(0, 5, "READY") == 0)
+        return true;
+
+    const std::string got = mGreeting;
+    ::close(mFd);
+    mFd = -1;
+    mMethod = Method::None;
+    mGreeting.clear();
+    mPending.clear();
+    if (got.compare(0, 8, "ERR busy") == 0)
+        mError = "another CPU-Power window already has the helper.";
+    return false;
+}
+
+//------------------------------------------------------------------------
+bool HelperSession::detach()
+{
+    if (!running())
+        return false;
+
+    std::vector<std::string> lines;
+    if (!exchange("DETACH", lines)) {
+        mError = "the helper refused to detach";
+        if (!lines.empty())
+            mError += ": " + lines.back();
+        return false;
+    }
+
+    // Close WITHOUT waiting. There is deliberately no waitpid here even when the helper is our
+    // child: it is supposed to still be running, and waiting for a process that is not going to
+    // exit would hang the window on the way out.
+    if (mFd >= 0) {
+        ::close(mFd);
+        mFd = -1;
+    }
+    mPid = -1;
+    mMethod = Method::None;
+    mPending.clear();
+    return true;
+}
+
+//------------------------------------------------------------------------
 bool HelperSession::start()
 {
     mError.clear();
+
+    // A helper left running by an earlier window IS the session, so re-attaching comes before
+    // anything else -- including the binary check, which is about starting a new one. Two
+    // helpers on one machine would each hold their own idea of the state to restore, and
+    // whichever exited last would put back settings the other had already replaced.
+    if (adopt())
+        return true;
+    mError.clear(); // "nothing to adopt" is the ordinary case, not a failure to report
 
     const std::string helper = helperPath();
     if (!checkHelperBinary(helper))
@@ -639,7 +739,8 @@ void HelperSession::stop()
     }
     if (mPid > 0) {
         // Wait, so that by the time this returns the restore has actually happened rather than
-        // being merely in progress.
+        // being merely in progress. An ADOPTED helper has no pid here and cannot be waited for --
+        // it is nobody's child -- so its restore completes just after this returns instead.
         int status = 0;
         while (::waitpid(mPid, &status, 0) < 0 && errno == EINTR) {
         }

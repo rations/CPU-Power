@@ -142,6 +142,106 @@ else
     printf '%s\n' "$d" | tr ' ' '\n' | grep -v '^$' | head -5 | sed 's/^/        /'
 fi
 
+printf '== 1c. DETACH persists on purpose, and ONLY on purpose ==\n'
+# Settings outlive the window that set them, which means the helper now has an exit that does
+# NOT restore. That is a real weakening of section 1b and the whole of its safety is the
+# asymmetry: persisting must be ASKED FOR. A client that dies cannot ask, so a crash still puts
+# the machine back. These assertions are what stop that asymmetry being quietly inverted.
+#
+# They also cover the property that makes "switch it off" still mean something: a detached helper
+# keeps holding the state the machine had BEFORE any of this. If it did not, the next session
+# would snapshot the already-modified machine and switching off would silently do nothing.
+rm -rf "$tmp/dt"; cp -r tests/fixtures/intel-pstate-active-hwp "$tmp/dt"
+detach_out=$(python3 - "$HELPER_TEST" "$tmp/dt" <<'PY'
+import os, socket, subprocess, sys, time
+
+helper, sysroot = sys.argv[1], sys.argv[2]
+epp_path = f"{sysroot}/devices/system/cpu/cpufreq/policy0/energy_performance_preference"
+def epp():
+    with open(epp_path) as f: return f.read().strip()
+
+def line(sock):
+    sock.settimeout(10); buf = b""
+    while not buf.endswith(b"\n"):
+        c = sock.recv(1)
+        if not c: return None
+        buf += c
+    return buf.decode().strip()
+
+base = epp()
+a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+proc = subprocess.Popen([helper, "--serve", "--sysroot", sysroot],
+                        stdin=b.fileno(), stdout=b.fileno(), stderr=subprocess.DEVNULL)
+b.close()
+line(a)
+a.sendall(b"SET epp 0 performance\n"); line(a)
+a.sendall(b"COMMIT\n"); line(a)
+a.sendall(b"DETACH\n")
+resp = line(a) or ""
+if not resp.startswith("OK "):
+    print("FAIL detach-refused"); sys.exit(0)
+sock = resp.split(" ", 1)[1]
+a.close()
+time.sleep(0.5)
+
+print("ALIVE" if proc.poll() is None else "FAIL not-resident")
+print("KEPT" if epp() == "performance" else "FAIL not-kept")
+mode = oct(os.stat(sock).st_mode & 0o777)
+print("MODE-OK" if mode == "0o600" else f"FAIL mode-{mode}")
+
+# A second client while one is attached must be refused, not left hanging.
+c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); c.connect(sock)
+g = line(c)
+print("REATTACH" if g and g.startswith("READY") else "FAIL no-reattach")
+d = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    d.connect(sock)
+    print("BUSY-REFUSED" if (line(d) or "").startswith("ERR busy") else "FAIL second-client")
+except OSError:
+    print("BUSY-REFUSED")
+d.close()
+
+c.sendall(b"QUIT\n"); line(c)
+proc.wait(timeout=10)
+print("PRISTINE" if epp() == base else f"FAIL restored-to-{epp()}")
+print("CLEANED" if not os.path.exists(sock) else "FAIL socket-left")
+PY
+)
+for claim in ALIVE:"the helper outlives a client that said DETACH" \
+             KEPT:"the setting is still applied after the client is gone" \
+             MODE-OK:"the rendezvous socket is mode 0600" \
+             REATTACH:"a later client re-attaches and is greeted" \
+             BUSY-REFUSED:"a SECOND client is refused rather than left hanging" \
+             PRISTINE:"switching off after a detach restores the ORIGINAL state, not the detached one" \
+             CLEANED:"the socket is removed when the helper exits"; do
+    tag=${claim%%:*}; desc=${claim#*:}
+    if printf '%s\n' "$detach_out" | grep -qx "$tag"; then
+        ok "$desc"
+    else
+        bad "$desc"
+        printf '%s\n' "$detach_out" | grep '^FAIL' | head -2 | sed 's/^/        /'
+    fi
+done
+
+# The other half of the asymmetry, and the one that must never regress: an unannounced EOF is a
+# client that died, and it still restores. 1b proves it for a helper that was never detached;
+# this proves the DETACH verb did not quietly become the default.
+rm -rf "$tmp/dte"; cp -r tests/fixtures/intel-pstate-active-hwp "$tmp/dte"
+"$CLI" --stop maximum --turbo off --helper "$HELPER_TEST" --sysroot "$tmp/dte" >/dev/null 2>&1 || true
+d=$(same_values tests/fixtures/intel-pstate-active-hwp "$tmp/dte")
+if [ -z "$d" ]; then
+    ok "a client that exits WITHOUT detaching still restores everything"
+else
+    bad "EOF stopped restoring -- persisting has become the default:"
+    printf '%s\n' "$d" | tr ' ' '\n' | grep -v '^$' | head -5 | sed 's/^/        /'
+fi
+
+# The cross-uid half of "who may re-attach" needs a second uid, which this gate does not have.
+# The filesystem half above (0600, owned by the session user) is asserted; the SO_PEERCRED check
+# is not, and saying so is better than implying coverage that is not here.
+notrun=$((notrun+1))
+note "NOT RUN: re-attach from a DIFFERENT uid is refused (SO_PEERCRED) -- needs a second user"
+
 printf '== 2. the pty case is loud, not silent ==\n'
 # A terminal on the protocol channel means line discipline -- echo, CR/LF translation, ^D -- and
 # that corrupts the protocol silently. The caller's setsid() is what prevents it; this asserts the

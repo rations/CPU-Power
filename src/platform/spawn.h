@@ -59,6 +59,7 @@ public:
         Polkit,       // pkexec, authorised by the installed action: no prompt for a locally
                       // seated user
         Unprivileged, // testing only: the helper run directly, unprivileged
+        Adopted,      // re-attached to a helper left running by an earlier window
     };
 
     // A short stable token for the chosen rung -- "polkit" or "direct". The gates assert on this,
@@ -97,6 +98,32 @@ public:
     // never a bare errno, and never a silent no-op.
     bool start();
 
+    // Re-attach to a helper a previous window left running, if there is one. Tried FIRST by
+    // start(), because a resident helper is the session: spawning a second one would give the
+    // machine two processes each believing its own snapshot is the state to restore, and the
+    // loser would put back settings the winner had already replaced.
+    //
+    // Connecting proves more than that the socket exists. A socket file can outlive the process
+    // that made it, so a stale one simply fails to connect and is not an error worth reporting;
+    // and the helper checks OUR credentials on its side before speaking, so a socket planted by
+    // somebody else cannot become our session either.
+    //
+    // Returns true only if a helper answered with its greeting.
+    bool adopt();
+
+    // Let the helper outlive this process WITH THE SETTINGS STILL APPLIED, and stop talking to
+    // it. This is what closing the window does while the tool is switched on.
+    //
+    // It is the one exit that does not restore, and it is explicit for exactly that reason: the
+    // helper treats an unannounced EOF as a client that died and puts the machine back, so
+    // persistence can never be the accidental outcome of a crash. Returns false if the helper
+    // refused -- in which case it is still attached and closing would restore.
+    bool detach();
+
+    // Where a resident helper listens. A compile-time directory plus our own uid; never taken
+    // from the environment, and never anything a caller supplies.
+    static std::string socketPath();
+
     // Testing only, and never used by the GUI: run a specific helper binary directly, without
     // any privilege escalation at all, optionally against a captured sysfs tree. This is the ONLY
     // entry point that accepts a path, it is unprivileged by construction, and it exists so the
@@ -106,9 +133,11 @@ public:
     // no possibility of a second shutdown trigger confusing the result.
     bool startUnprivileged(const std::string &helperPath, const std::string &sysroot);
 
+    // An adopted helper is not our child, so there is no pid to have. The channel is what makes
+    // a session, not the parentage.
     bool running() const
     {
-        return mPid > 0 && mFd >= 0;
+        return mFd >= 0 && (mPid > 0 || mMethod == Method::Adopted);
     }
 
     Method method() const
@@ -139,8 +168,10 @@ public:
     bool exchange(const std::string &command, std::vector<std::string> &lines,
                   int timeoutMs = 5000);
 
-    // Close the pipe and reap. The helper restores the machine on EOF; this waits for it so the
-    // restore has actually happened by the time this returns.
+    // Close the channel and reap. The helper restores the machine on EOF; this waits for it so
+    // the restore has actually happened by the time this returns. For an ADOPTED helper there is
+    // no child to reap -- it belongs to no process now -- so this closes and returns, and the
+    // restore happens just after rather than just before.
     void stop();
 
     // The compiled-in helper path, for diagnostics and for the gates to assert.

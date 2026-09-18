@@ -13,6 +13,7 @@
 #include "config.h"
 #include "geometry.h"
 #include "panel.h"
+#include "platform/spawn.h"
 #include "platform/x11window.h"
 
 #include <X11/keysym.h>
@@ -39,8 +40,35 @@ int main(int argc, char **argv)
                         static_cast<double>(geo::kScaleMin), static_cast<double>(geo::kScaleMax));
                 return 2;
             }
+        } else if (strcmp(argv[i], "--off") == 0) {
+            // The way back out without a window.
+            //
+            // Settings now outlive the window that set them, which means there is a state the
+            // user can be in where something is applied and the GUI will not open -- no display,
+            // a broken X session, a machine reached over SSH. Without this, "switch it off" would
+            // have no answer in that state, and a tool whose off switch can become unreachable
+            // has no off switch. It needs no privilege and asks for none: it reconnects to the
+            // helper the user already authorised and tells it to put the machine back.
+            HelperSession s;
+            if (!s.adopt()) {
+                printf("cpu-power: nothing is running; the machine is as the kernel left it.\n");
+                return 0;
+            }
+            std::vector<std::string> lines;
+            const bool ok = s.exchange("RESTORE", lines, 10000);
+            s.stop();
+            if (!ok) {
+                fprintf(stderr, "cpu-power: the helper could not restore%s\n",
+                        lines.empty() ? "." : (": " + lines.back()).c_str());
+                return 1;
+            }
+            printf("cpu-power: restored; the machine is as the kernel left it.\n");
+            return 0;
         } else if (strcmp(argv[i], "--help") == 0) {
-            printf("usage: cpu-power [--scale <%.2f..%.2f>]\n\n"
+            printf("usage: cpu-power [--scale <%.2f..%.2f>] [--off]\n\n"
+                   "  --off   put the machine back and stop the helper, without opening a\n"
+                   "          window. Settings outlive the window that set them, so this is\n"
+                   "          the way to switch them off from a terminal.\n\n"
                    "  Preferences are remembered in %s\n"
                    "  They set where the controls sit and are NOT applied at startup: nothing\n"
                    "  changes until the Active toggle is turned on.\n",

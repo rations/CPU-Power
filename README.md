@@ -21,9 +21,22 @@ This is that, in a window, correctly, and reversibly.
 
 **Off means the machine is exactly as the kernel left it.** That is the whole safety
 property, and it is what makes the tool safe to try. Turning the master toggle off
-restores. So does closing the window. So does the program being killed — the privileged
-helper puts everything back when its input closes, and closing that input is something
-`SIGKILL` cannot prevent. There is no path that depends on an orderly shutdown.
+restores — and so does the program being killed, because the privileged helper puts
+everything back when its input closes unexpectedly, and closing that input is something
+`SIGKILL` cannot prevent.
+
+**Closing the window does not.** It is a window you open to change a setting and then
+close; the setting is still there afterwards, which is the point of having it. You do not
+leave it open while you work. The helper carries on without it and exits when you switch
+off — so something runs as root exactly while your machine is overridden, and never
+otherwise. `cpu-power --off` reaches it from a terminal if you would rather not open the
+window again.
+
+The difference between those two is deliberate and it is the safety property: persisting
+has to be **asked for**. A window that crashes cannot ask, so a crash still puts the
+machine back. Nothing is written to disk to make this work — what your machine looked like
+beforehand is held by that process, which is why switching off still returns you there
+rather than to whatever the last session happened to leave behind.
 
 ## What it sets
 
@@ -47,8 +60,13 @@ that — and the slider makes it *worse*, because a faster core finishes its blo
 idles longer, and lets the kernel pick a deeper state. DAW mode holds `/dev/cpu_dma_latency`
 open at **the smallest non-zero exit latency your machine reports**: the shallowest state
 that still actually halts the core. It does not request zero, which would admit only the
-POLL pseudo-state and leave every core spinning for no benefit at all. Because the kernel
-drops the constraint when the last descriptor closes, DAW mode cannot get stuck on.
+POLL pseudo-state and leave every core spinning for no benefit at all.
+
+Because the kernel drops that constraint when the last descriptor closes, DAW mode is the
+one setting that **cannot** outlive the process holding it — no tool can make it, on any
+system. That is why the helper stays running after you close the window rather than exiting:
+it is the descriptor. It still cannot get stuck on, because switching off closes it and so
+does shutting down, and `cpu-power --off` closes it from a terminal.
 
 ## Installing
 

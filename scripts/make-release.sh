@@ -10,6 +10,9 @@
 # administrator password it promises never to ask for. So the archive ships sources, and the
 # path is fixed when the recipient configures.
 #
+# ONE ARCHIVE: cpu-power-<version>.tar.gz, plus its checksum. gzip because every machine can
+# already open it.
+#
 # WHY ustar. The archive is created with GNU tar but written in the POSIX.1-1988 ustar format,
 # which every tar in existence reads -- bsdtar, busybox tar, toybox tar, Python tarfile, 7-Zip.
 # pax (POSIX.1-2001) is the newer standard and is what GNU tar calls --format=posix, but it
@@ -208,14 +211,11 @@ tar -C "$stage" \
 gzip -9nc "$stage/$name.tar" > "$outdir/$name.tar.gz"
 say "$outdir/$name.tar.gz ($(du -h "$outdir/$name.tar.gz" | cut -f1))"
 
-if command -v xz >/dev/null 2>&1; then
-    xz -9ec "$stage/$name.tar" > "$outdir/$name.tar.xz"
-    say "$outdir/$name.tar.xz ($(du -h "$outdir/$name.tar.xz" | cut -f1))"
-else
-    say "xz not found -- gzip only. gzip is the one to publish if only one is published."
-fi
-
-( cd "$outdir" && sha256sum "$name".tar.* > "$name.sha256" )
+# One archive, not two. gzip is the one every machine can already open without installing
+# anything, which is the whole point of shipping a tarball rather than a package; a second
+# compression of the same bytes is another file to publish, checksum and keep straight for a few
+# hundred kilobytes.
+( cd "$outdir" && sha256sum "$name.tar.gz" > "$name.sha256" )
 say "$outdir/$name.sha256"
 
 # ---------------------------------------------------------------------------------------------

@@ -81,6 +81,18 @@ void fillWorstCase(Panel &p)
     p.stops.value = 4;
 }
 
+// The panel as it opens when it has RE-ATTACHED to settings a previous window left running.
+// A distinct state, not a variation: the toggle is on before the user has touched anything, and
+// the status line is one this tool only ever says here. It is measured rather than eyeballed
+// against the case above -- "shorter than the other one" is a guess about how a string renders,
+// and which of two strings is wider depends on the font actually installed.
+void fillAdopted(Panel &p)
+{
+    fillWorstCase(p);
+    p.status = "re-attached to settings left running by an earlier window";
+    p.statusIsError = false;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -113,8 +125,12 @@ int main(int argc, char **argv)
     Panel panel;
     fillWorstCase(panel);
 
-    // --- the audit, once ----------------------------------------------------------------------
-    {
+    Panel adopted;
+    fillAdopted(adopted);
+
+    // --- the audit, once per distinct panel STATE (not once per scale) --------------------------
+    for (Panel *whichPanel : {&panel, &adopted}) {
+        Panel &panel = *whichPanel;
         const int pw = static_cast<int>(geo::kWinW + 0.5f);
         const int ph = static_cast<int>(geo::kWinH + 0.5f);
         cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pw, ph);

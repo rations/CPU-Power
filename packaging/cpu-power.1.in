@@ -49,8 +49,31 @@ what the kernel reports afterwards rather than what was asked for.
 Scale the window. Useful on a high\-DPI display. The value is remembered, so this is
 normally needed once.
 .TP
+.B \-\-off
+Put the machine back and stop the privileged helper, without opening a window.
+Settings outlive the window that set them, so this is how to switch them off from a
+terminal \- on a machine with no display, or over a remote login. It needs no privilege
+of its own: it reconnects to the helper this user already started.
+Prints what it did and exits 0 even when nothing was running.
+.TP
 .B \-\-help
 Print usage, including where preferences are stored, and exit.
+.
+.SH LIFETIME
+Closing the window does
+.B not
+undo anything. The settings stay until they are switched off with the Active toggle, with
+.BR "cpu-power \-\-off" ,
+or by shutting the machine down; nothing is written to disk and nothing is reapplied at
+boot. The privileged helper keeps running in the meantime, because the DAW mode latency
+request exists only for as long as a process holds
+.I /dev/cpu_dma_latency
+open. It exits when the settings are switched off, so a root process exists exactly while
+the machine is overridden.
+.PP
+A window that exits WITHOUT saying so first \- one that crashed, or was killed \- is treated
+as a failure rather than as an instruction, and the helper restores the machine and exits.
+Persisting has to be asked for, and a process that has died cannot ask.
 .
 .SH THE CONTROLS
 .TP
