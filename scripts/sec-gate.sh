@@ -448,7 +448,14 @@ else
 
     # The id in the FILE and the id compiled into the BINARY must be the same string. If they
     # drift, pkexec matches no action and every user gets an administrator password prompt.
-    if strings "$CLI" | grep -qxF "$ACTION_ID"; then
+    #
+    # -F but NOT -x. This used to anchor the whole line and it was a false negative: the linker
+    # merges adjacent string constants, so `strings` emits the id run together with whatever
+    # literal happens to precede it in .rodata ("...cpu/cpufreqio.github.rations.cpu-power"), and
+    # an exact-line match then fails on a binary that does carry the id. A substring match is the
+    # right question here anyway -- the id is a distinctive reverse-DNS literal, not a word that
+    # could turn up by accident -- and a gate that cries wolf is one that gets ignored.
+    if strings -a "$CLI" | grep -qF "$ACTION_ID"; then
         ok "the same action id is compiled into the binary"
     else
         bad "the binary does not carry the action id '$ACTION_ID'"

@@ -70,9 +70,55 @@ does shutting down, and `cpu-power --off` closes it from a terminal.
 
 ## Installing
 
+### From the release tarball
+
+Download `cpu-power-<version>-<arch>.tar.gz`, check it against the `.sha256` beside it, unpack
+it anywhere, and run the installer inside:
+
+```sh
+sha256sum -c cpu-power-0.1.0-x86_64.sha256
+tar -xf cpu-power-0.1.0-x86_64.tar.gz
+cd cpu-power-0.1.0-x86_64
+sudo ./install.sh
+```
+
+That is the whole install, and there is nothing to run afterwards — polkitd picks the action up
+on its own the next time it is asked. To see exactly what it would do first:
+
+```sh
+./install.sh --dry-run      # needs no root, changes nothing
+```
+
+And to take it back out again, from the same unpacked directory:
+
+```sh
+sudo ./install.sh --uninstall
+```
+
+It removes exactly the files it installed and its own two directories, and nothing else. Your
+settings were never written to disk, so there is nothing else to clean up.
+
+**There is no `--prefix`, and that is not an oversight.** The helper's absolute path is compiled
+into the GUI and written into the polkit action, and polkit compares the two byte for byte; the
+two directories polkitd reads actions from are fixed and belong to polkit rather than to this
+project. Installing anywhere else gives you a tool that still works and **silently** starts
+asking for an administrator password it was never meant to ask for. `install.sh` checks the
+action against the payload before it copies anything and refuses rather than let that happen.
+It is the same reason the source build below wants `-DCMAKE_INSTALL_PREFIX=/usr`.
+
+Run time dependencies are `cairo`, `freetype`, `fontconfig` and `libX11` which a machine
+running X11 already has, plus `libstdc++` and **glibc 2.34 or newer**. The archive is built for
+one architecture and says which in its name. If your distribution is older than that glibc,
+build from source instead, nothing about the tool needs a new one, the released binaries were
+simply linked against it.
+
+At run time you also want `polkit`. The tool works without it, but that is the path that needs
+no password.
+
+### From source
+
 Build dependencies: a C and C++17 compiler, CMake ≥ 3.16, and the development packages for
-`cairo`, `cairo-ft`, `cairo-xlib`, `freetype2`, `fontconfig` and `x11`. At run time you want
-`polkit` — the tool works without it, but that is the path that needs no password.
+`cairo`, `cairo-ft`, `cairo-xlib`, `freetype2`, `fontconfig` and `x11`.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
@@ -88,10 +134,24 @@ administrator password it was never meant to ask for. The build warns at configu
 the action directory is not one of those two, and you can override it on its own with
 `-DCPUPOWER_POLKIT_ACTIONDIR=/usr/share/polkit-1/actions`.
 
-The install places two binaries, the GUI and the privileged helper, plus the polkit action
-that says who may run the helper, the fonts the window is lettered in, the icon theme entries,
-a desktop entry and a manual page. **It sets no setuid or setgid bit**, and a test asserts
-that.
+### What lands either way
+
+Two binaries, the GUI and the privileged helper, plus the polkit action that says who may run
+the helper, the fonts the window is lettered in, the icon theme entries, a desktop entry and a
+manual page:
+
+```
+/usr/bin/cpu-power
+/usr/libexec/cpu-power/cpu-power-helper
+/usr/share/polkit-1/actions/io.github.rations.cpu-power.policy
+/usr/share/cpu-power/fonts/
+/usr/share/icons/hicolor/*/apps/cpu-power.png
+/usr/share/applications/cpu-power.desktop
+/usr/share/man/man1/cpu-power.1
+```
+
+**It sets no setuid or setgid bit**, and a test asserts that — as does the release script,
+against the bytes in the tarball.
 
 ## How it reaches root
 
@@ -168,6 +228,13 @@ helper.
 The icon set and the icon data compiled into the binary are generated from `icon.png` by
 `scripts/make-icons.sh`; both are committed, so building needs a compiler and not an image
 toolchain.
+
+`scripts/make-release.sh` cuts the release tarball: a clean `/usr` build, the installed surface
+and nothing else, plus `packaging/install.sh` and the three documents at the top. It checks the
+staged tree against an exact manifest, then unpacks what it wrote and runs the shipped
+`install.sh` against a scratch root — installing, uninstalling, and confirming it refuses an
+archive whose action does not match its helper. It does **not** run the gates above; those are a
+condition on committing, not on packaging, so run them first.
 
 ## Licence
 
