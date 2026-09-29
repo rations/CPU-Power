@@ -111,8 +111,13 @@ bool App::probe()
         mPanel.daw.enabled = false;
         mPanel.daw.disabledReason = "no /dev/cpu_dma_latency: this kernel has no cpuidle PM-QoS";
     } else if (!mIdle.limitUs) {
+        // The kernel has cpuidle PM-QoS (the device above exists), yet no idle state is worth
+        // blocking: either no cpuidle driver registered any state -- a Raspberry Pi 5, whose
+        // device tree defines no idle states, so its cores only ever halt in WFI -- or every
+        // state already wakes in 0 us. The CPU idles only in its shallowest halt either way:
+        // nothing is missing from the kernel, and DAW mode would change nothing.
         mPanel.daw.enabled = false;
-        mPanel.daw.disabledReason = "DAW mode unavailable: " + mIdle.unavailableReason();
+        mPanel.daw.disabledReason = "DAW mode not needed: this computer has no deep sleep states";
     }
     if (!mPanel.daw.enabled) {
         missing = missing.empty() ? mPanel.daw.disabledReason

@@ -93,6 +93,17 @@ void fillAdopted(Panel &p)
     p.statusIsError = false;
 }
 
+// The panel as it opens on a machine with neither a turbo knob nor an idle state worth blocking
+// -- a Raspberry Pi 5 -- where both disabled reasons share the status line.
+void fillNoDeepIdle(Panel &p)
+{
+    fillWorstCase(p);
+    p.daw.enabled = false;
+    p.daw.on = false;
+    p.status = "no turbo control, and DAW mode not needed: this computer has no deep sleep states";
+    p.statusIsError = false;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -128,8 +139,11 @@ int main(int argc, char **argv)
     Panel adopted;
     fillAdopted(adopted);
 
+    Panel noDeepIdle;
+    fillNoDeepIdle(noDeepIdle);
+
     // --- the audit, once per distinct panel STATE (not once per scale) --------------------------
-    for (Panel *whichPanel : {&panel, &adopted}) {
+    for (Panel *whichPanel : {&panel, &adopted, &noDeepIdle}) {
         Panel &panel = *whichPanel;
         const int pw = static_cast<int>(geo::kWinW + 0.5f);
         const int ph = static_cast<int>(geo::kWinH + 0.5f);
